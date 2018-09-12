@@ -17,7 +17,7 @@
 import { injectable, inject, postConstruct } from 'inversify';
 import URI from '@theia/core/lib/common/uri';
 import { ResourceProvider, CommandService, MenuPath } from '@theia/core';
-import { ContextMenuRenderer, LabelProvider, DiffUris, StatefulWidget, Message, SELECTED_CLASS } from '@theia/core/lib/browser';
+import { ContextMenuRenderer, LabelProvider, DiffUris, StatefulWidget, Message, SELECTED_CLASS, Key } from '@theia/core/lib/browser';
 import { EditorManager, EditorWidget, EditorOpenerOptions } from '@theia/editor/lib/browser';
 import { WorkspaceService, WorkspaceCommands } from '@theia/workspace/lib/browser';
 import { Git, GitFileChange, GitFileStatus, Repository, WorkingDirectoryStatus, CommitWithChanges } from '../common';
@@ -61,6 +61,7 @@ export class GitWidget extends GitDiffWidget implements StatefulWidget {
     protected commitMessageValidationResult: GitCommitMessageValidator.Result | undefined;
     protected lastCommit: { commit: CommitWithChanges, avatar: string } | undefined;
     protected lastHead: string | undefined;
+    protected lastSelectedNode?: { id: number, node: GitFileChangeNode };
 
     @inject(EditorManager)
     protected readonly editorManager: EditorManager;
@@ -117,6 +118,11 @@ export class GitWidget extends GitDiffWidget implements StatefulWidget {
         }
     }
 
+    onAfterAttach(msg: Message): void {
+        super.onAfterAttach(msg);
+        this.addKeyListener(this.node, Key.SPACE, () => this.handleListSpace());
+    }
+
     onActivateRequest(msg: Message): void {
         const messageInput = document.getElementById(GitWidget.Styles.COMMIT_MESSAGE) as HTMLInputElement;
         if (messageInput) {
@@ -139,6 +145,22 @@ export class GitWidget extends GitDiffWidget implements StatefulWidget {
         // Do not restore the validation message if the commit message is undefined or empty.
         this.commitMessageValidationResult = this.message ? oldState.commitMessageValidationResult : undefined;
         this.messageBoxHeight = oldState.messageBoxHeight || GitWidget.MESSAGE_BOX_MIN_HEIGHT;
+    }
+
+    protected handleListSpace(): void {
+        const change = this.getSelected();
+        if (change && this.repositoryProvider.selectedRepository) {
+            this.lastSelectedNode = {
+                id: this.indexOfSelected,
+                node: change
+            };
+            const repository = this.repositoryProvider.selectedRepository;
+            if (!change.staged) {
+                this.stage(repository, change);
+            } else {
+                this.unstage(repository, change);
+            }
+        }
     }
 
     protected async amend(): Promise<void> {
@@ -235,6 +257,26 @@ export class GitWidget extends GitDiffWidget implements StatefulWidget {
         this.mergeChanges = mergeChanges.sort(sort);
         this.gitNodes = [...this.mergeChanges, ...this.stagedChanges, ...this.unstagedChanges];
         this.update();
+        this.afterUpdateView();
+    }
+
+    protected afterUpdateView(): void {
+        if (this.lastSelectedNode) {
+            let newId = this.lastSelectedNode.id;
+            if (this.lastSelectedNode.node.staged) {
+                newId -= 1;
+                if (newId < 0) {
+                    newId = 0;
+                }
+                this.gitNodes[newId].selected = true;
+            } else {
+                if (this.gitNodes[newId].staged && this.gitNodes[newId + 1]) {
+                    newId += 1;
+                }
+                this.gitNodes[newId].selected = true;
+            }
+            this.lastSelectedNode = undefined;
+        }
     }
 
     protected renderCommitMessage(): React.ReactNode {
@@ -449,9 +491,7 @@ export class GitWidget extends GitDiffWidget implements StatefulWidget {
         return [username, email];
     }
 
-    protected readonly unstage = (repository: Repository, change: GitFileChange) => {
-        this.doUnstage(repository, change);
-    }
+    protected readonly unstage = (repository: Repository, change: GitFileChange) => this.doUnstage(repository, change);
     protected async doUnstage(repository: Repository, change: GitFileChange) {
         try {
             await this.git.unstage(repository, change.uri);
@@ -460,9 +500,7 @@ export class GitWidget extends GitDiffWidget implements StatefulWidget {
         }
     }
 
-    protected readonly discard = (repository: Repository, change: GitFileChange) => {
-        this.doDiscard(repository, change);
-    }
+    protected readonly discard = (repository: Repository, change: GitFileChange) => this.doDiscard(repository, change);
     protected async doDiscard(repository: Repository, change: GitFileChange) {
         // Allow deletion, only iff the same file is not yet in the Git index.
         if (await this.git.lsFiles(repository, change.uri, { errorUnmatch: true })) {
@@ -476,9 +514,7 @@ export class GitWidget extends GitDiffWidget implements StatefulWidget {
         }
     }
 
-    protected readonly stage = (repository: Repository, change: GitFileChange) => {
-        this.doStage(repository, change);
-    }
+    protected readonly stage = (repository: Repository, change: GitFileChange) => this.doStage(repository, change);
     protected async doStage(repository: Repository, change: GitFileChange) {
         try {
             await this.git.add(repository, change.uri);
